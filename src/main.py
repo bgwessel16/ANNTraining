@@ -6,19 +6,53 @@ import sys
 import argparse
 import matplotlib.pyplot as plt
 from torch.utils import tensorboard
+import logging
 
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__) 
+
+class FunctionGenerator:
+    def __init__(self, n_inputs, features=None, default_value=None, func = lambda X: np.float32(np.sum(np.array(X),axis=-1))):
+        if features is None:
+            features = np.arange(n_inputs)
+            
+        if (n_inputs < len(features)):
+            logger.error(f'n_inputs {n_inputs} is less than the length of features {len(features)}')
+
+        self.n_inputs = n_inputs
+        self.features = features
+        self.default_value = default_value
+        
+        weights = np.zeros(n_inputs)
+        for f in self.features:
+            weights[f] = 1.0
+
+        def func_wrapper(X):
+            xd = np.array(X) * np.array(weights)
+            logger.info( f'func_wrapper {X}*{weights}={xd} {xd.shape}')            
+            for i,p in enumerate(weights):
+                if (self.default_value is not None) and (i not in self.features):
+                    xd[:,i] = default_value
+            return func(xd)
+        
+        self.func = func_wrapper
+                    
+                                    
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, samples=1000, x_inputs=1, i_inputs=0, z_inputs=0, noise=0,
-            f = lambda x: np.float32(np.sum(x)), device = None):
+    def __init__(self, 
+                 g, 
+                 n_samples=10, 
+                 noise=0,
+                 device = None):
         if (device is None):
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+    
         #self.X = (torch.rand(samples, x_inputs + i_inputs + z_inputs, dtype=torch.float32) - 0.5)*2.0
-        self.X = (torch.rand(samples, x_inputs + i_inputs + z_inputs, dtype=torch.float32))
+        self.X = (torch.rand(n_samples, g.n_inputs, dtype=torch.float32))
         
-        self.fun = f
+        self.g = g
         #self.fun = np.vectorize(f, signature='(n,m)->(n)')
-        yv = torch.tensor([ self.fun(x) for x in self.X ])
+        yv = torch.tensor(self.g.func(self.X))
         
         self.Y = yv
         
@@ -27,7 +61,7 @@ class Dataset(torch.utils.data.Dataset):
         
         self.len = self.X.shape[0]
         self.shape = self.X.shape
-    
+        
     def loader(self, batch_size=256):
         return torch.utils.data.DataLoader(dataset=self, batch_size=batch_size, shuffle=True)
        
@@ -99,8 +133,8 @@ class NN(torch.nn.Module):
                 sum_vloss.extend(vloss.flatten().tolist())
         return sum_vloss
 
-def draw_truth(ax1, x_sel, train, test, fun=lambda x: np.float32(np.sum(x, axis=0))):
-    x1_col, x2_col = x_sel
+def draw_truth(ax1, g, train, test):
+    x1_col, x2_col = g.features
     x_lim = [min(torch.min(train.X[:,x1_col]).cpu(), torch.min(test.X[:,x1_col]).cpu()),max(torch.max(train.X[:,x1_col]).cpu(), torch.max(test.X[:,x1_col]).cpu())]
     y_lim = [min(torch.min(train.X[:,x2_col]).cpu(), torch.min(test.X[:,x2_col]).cpu()),max(torch.max(train.X[:,x2_col]).cpu(), torch.max(test.X[:,x2_col]).cpu())]
     
@@ -117,7 +151,7 @@ def draw_truth(ax1, x_sel, train, test, fun=lambda x: np.float32(np.sum(x, axis=
     data = data.T
     
     print(f'draw_truth {data.shape}')
-    zs = np.array(test.fun(data))
+    zs = np.array(g.func(data))
     Z = zs.reshape(X.shape)
     
     ax1.plot_surface(X,Y,Z,alpha=0.5,facecolor="#80800000")
@@ -136,8 +170,8 @@ def draw_truth(ax1, x_sel, train, test, fun=lambda x: np.float32(np.sum(x, axis=
     ax1.set_ylabel("x2")
     ax1.set_zlabel("z")
 
-def draw_model(ax1, x_sel, nn, x_lim, y_lim):
-    x1_col, x2_col = x_sel    
+def draw_model(ax1, g, nn, x_lim, y_lim):
+    x1_col, x2_col = g.features    
     x = np.arange(x_lim[0], x_lim[1], 0.1, dtype=np.float32)
     y = np.arange(y_lim[0], y_lim[1], 0.1, dtype=np.float32)
     
@@ -156,19 +190,23 @@ def draw_model(ax1, x_sel, nn, x_lim, y_lim):
     Zp = z0.reshape(X.shape).cpu()
     ax1.plot_surface(X,Y,Zp,facecolor="#80000080")
         
-def gen_func_sum(x_dim, weights=None):
-    if (weights is None):
-        #sel=np.arange(x_dim)
-        weights = torch.tensor([1.0 for i in range(x_dim)])
-    print(f'gen_func_sum {x_dim} {weights}')
-    return lambda x: np.float32(np.array(x).dot(np.array(weights)))
+# def gen_func_sum(n_inputs, weights=None):
+#     if (weights is None):
+#         #sel=np.arange(n_inputs)
+#         weights = torch.tensor([1.0 for i in range(n_inputs)])
+#     print(f'gen_func_sum {n_inputs} {weights}')
+#     return lambda x: np.float32(np.array(x).dot(np.array(weights)))
 
-def gen_func_product(x_dim, weights=None):
-    if (weights is None):
-        #sel=np.arange(x_dim)
-        weights = torch.tensor([1.0 for i in range(x_dim)])
-    print(f'gen_func_product {x_dim} {weights}')
-    return lambda x: np.float32(np.prod(np.array(x)*(np.array(weights)),axis=-1))
+# def gen_func_product(n_inputs, weights=None):
+#     if (weights is None):
+#         #sel=np.arange(x_dim)
+#         weights = torch.tensor([1.0 for i in range(n_inputs)])
+#     print(f'gen_func_product {x_dim} {weights}')
+#     def f(x):
+#         p = [ w for w in weights if w != 0 else 1.0 ]
+
+#         return p 
+#     return f 
 
 args = None
 
@@ -181,53 +219,62 @@ def main(argv = None):
     parser = argparse.ArgumentParser(prog="nn_test")
     parser.add_argument("--hidden_dim", metavar="hidden_dim", type=int, default=1)
     parser.add_argument("--x_dim", "-x", metavar="x_dim", type=int, default=2)
+    parser.add_argument("--i_dim", "-i", metavar="i_dim", type=int, default=0)
     parser.add_argument("--device", "-d", default=None)
     parser.add_argument("--n_train", type=int, default=100)
     parser.add_argument("--n_test", type=int, default=10)
+    parser.add_argument("--noise", type=float, default=0)
+    
     parser.add_argument("--max_epochs", type=int, default=100000)
-    parser.add_argument("--i_dim", type=int, default = 0)
-    #parser.add_argument("--z_dim", type=int, default = 0)
+    parser.add_argument("--features", type=str, default = "")
+    parser.add_argument("--value", type=float, default = None)
     parser.add_argument("--learning_rate", type=float, default=0.1)
     parser.add_argument("--tensorboard", action="store_true", default=False)
     
     args = parser.parse_args(argv)
+    
+    total_dim = args.x_dim + args.i_dim
+
+    if args.features != "":
+        args.features = ",".split(args.features)
+        if (len(args.features) != args.x_dim):
+            logger.error(f'Number of relevant features {args.x_dim} does not match the number of features provided {args.features}')
+    else:
+        if (args.i_dim > 0):
+            args.features = np.random.choice(np.arange(total_dim), args.x_dim, replace=False)
+        else:
+            args.features = np.arange(total_dim)
+    
+    # if args.value is not None:
+    #     args.value = float(args.value)
+        
     print(argv, args)
     if (args.device is None):
         args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    g = FunctionGenerator(total_dim, args.features, args.value, lambda X: np.float32(np.sum(np.array(X), axis=-1)))
     
-    total_dim = args.x_dim + args.i_dim
-    weights = np.ones(total_dim)
-    if args.x_dim < total_dim:
-        sel = np.random.choice(total_dim, args.i_dim,replace=False)
-        for s in sel:
-            weights[s] = 0
-            
-    x_sel = list(filter(lambda x: weights[x] == 1,range(len(weights))))
-    print( f'x_sel {x_sel} {weights}')
-            
-    #f = gen_func_product(total_dim, weights)
-    f = gen_func_sum(total_dim, weights)
+    train_data = Dataset(g, n_samples=args.n_train, noise=args.noise)
     
     t = np.array([[0,0], [0,1], [0.5,0.5], [0,1], [1,0], [0.5,0], [0,0.5],[1,1]])
 
-    data = np.zeros((len(t),len(weights)),dtype=np.float32)
+    data = np.zeros((len(t),g.n_inputs),dtype=np.float32)
     for i,d in enumerate(t):
         for j,v in enumerate(d):
-            data[i, x_sel[j]] = v
+            data[i, g.features[j]] = v
     
     print(f't data {data.shape}')
     
-    zt = f(data)
+    zt = g.func(data)
     
     print(t)
     print(data)
     print(zt)
     
-    train_data = Dataset(args.n_train, total_dim, 0, f=f)
+
     
-    test_data = Dataset(args.n_test, total_dim, 0, f = train_data.fun)
-    #print('train_data:',  train_data.X, train_data.Y, 'test_data', test_data.X, test_data.Y)
-    print('train_data:',  train_data.X.shape, train_data.Y.shape, 'test_data', test_data.X.shape, test_data.Y.shape)
+    test_data = Dataset(g, args.n_test)
+    print('train_data:',  train_data.X.shape, train_data.X.dtype, train_data.Y.shape, train_data.Y.dtype, 'test_data', test_data.X.shape, test_data.X.dtype, test_data.Y.shape, test_data.Y.dtype)
     
     model = NN(train_data.shape[1], args.hidden_dim, 1)
     model.to(args.device)
@@ -263,12 +310,12 @@ def main(argv = None):
         print( f'Epoch {epochs} Training loss {tloss[-1]} Validation loss {vloss}')
         epochs = epochs + epoch_inc                         
     
-    if (len(x_sel) == 2):
+    if (len(g.features) == 2):
         import matplotlib.pyplot as plt
         from mpl_toolkits.mplot3d import Axes3D  
         # Axes3D import has side effects, it enables using projection='3d' in add_subplot
     
-        x1_col, x2_col = x_sel
+        x1_col, x2_col = g.features
         x_lim = [min(torch.min(train_data.X[:,x1_col]).cpu(), torch.min(test_data.X[:,x1_col]).cpu()),
                  max(torch.max(train_data.X[:,x1_col]).cpu(), torch.max(test_data.X[:,x1_col]).cpu())]
         y_lim = [min(torch.min(train_data.X[:,x2_col]).cpu(), torch.min(test_data.X[:,x2_col]).cpu()),
@@ -277,8 +324,8 @@ def main(argv = None):
         fig = plt.figure()
         ax1 = fig.add_subplot(1,2,1, projection='3d')
 
-        draw_truth(ax1, x_sel, train_data, test_data, f)
-        draw_model(ax1, x_sel, model, x_lim, y_lim)
+        draw_truth(ax1, g, train_data, test_data)
+        draw_model(ax1, g, model, x_lim, y_lim)
         
         ax2 = fig.add_subplot(1,2,2)
         ax2.set_title("Loss")
@@ -296,5 +343,5 @@ def main(argv = None):
         
 if __name__ == "__main__":
 #    main(["--max_epochs", "1000", "--hidden_dim", "100", "--x_dim", "2", "--n_train", "100", "--n_test", "5", "--learning_rate", "0.01", "--tensorboard"])
-    main(["--max_epochs", "1000", "--hidden_dim", "100", "--x_dim", "2", "--i_dim", "100", "--n_train", "10", "--n_test", "100", "--learning_rate", "0.01", "--tensorboard"])
+    main(["--max_epochs", "1000", "--hidden_dim", "10", "--x_dim", "2", "--i_dim", "10", "--n_train", "10", "--n_test", "100", "--learning_rate", "0.01", "--value", "1.0", "--tensorboard"])
     
